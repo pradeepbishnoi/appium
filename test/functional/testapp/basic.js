@@ -5,6 +5,7 @@
 
 var assert = require("assert")
   , describeWd = require("../../helpers/driverblock.js").describeForApp('TestApp')
+  , should = require('should')
   , _ = require("underscore");
 
 describeWd('calc app', function(h) {
@@ -115,6 +116,24 @@ describeWd('calc app', function(h) {
     });
   });
 
+
+  it('should find alert like other elements', function(done){
+    var driver = h.driver;
+    driver.elementsByTagName('button', function(err, buttons) {
+      buttons[1].click(function() {
+        driver.elementByTagName('alert', function(err, alert) {
+          alert.elementByTagName('text', function(err, el) {
+            el.text(function(err, text) {
+              // maybe we could get alert body text too?
+              assert.equal(text, "Cool title");
+              driver.dismissAlert(done);
+            });
+          });
+        });
+      });
+    });
+  });
+
   // TODO: Needs fixing - THIS TEST DOES NOT WORK
   // I'm not sure how we can reliably test UIAutomation setTimeout
   // see: http://stackoverflow.com/questions/8852977/how-does-uiautomation-determine-whether-a-uiaelement-isvisible/9051340#9051340
@@ -129,21 +148,19 @@ describeWd('calc app', function(h) {
      //});
    //});
 
-
-  // TOFIX: THIS TEST ALWAYS RETURNS 'undefined' orientation
-  // LOOKS like UIATargetClass.setDeviceOrientation is not working properly with simulator?
-   //var testOrientation = function(specOrientation) {
-     //it('should get and set the screen orientation - ' + specOrientation, function(done) {
-       //h.driver.setOrientation(specOrientation, function(err, orientation) {
-         //assert.equal(orientation, specOrientation);
-         //h.driver.getOrientation(function(err, orientation) {
-           //assert.equal(orientation, specOrientation);
-           //done();
-         //});
-       //});
-     //});
-   //};
-   //_.each(["PORTRAIT", "LANDSCAPE"], testOrientation);
+  it('should get tag names of elements', function(done) {
+    h.driver.elementByTagName('button', function(err, el) {
+      el.getTagName(function(err, name) {
+        name.should.equal("UIAButton");
+        h.driver.elementByTagName('text', function(err, el) {
+          el.getTagName(function(err, name) {
+            name.should.equal("UIAStaticText");
+            done();
+          });
+        });
+      });
+    });
+  });
 
   it('should be able to get text of a button', function(done) {
     h.driver.elementsByTagName('button', function(err, els) {
@@ -151,15 +168,6 @@ describeWd('calc app', function(h) {
         text.should.eql("ComputeSumButton");
         done();
       });
-    });
-  });
-
-  return it('should get an app screenshot', function(done){
-    h.driver.takeScreenshot(function(err, screenshot){
-      assert.notEqual(typeof screenshot, "undefined");
-      assert.notEqual(screenshot, null);
-      assert.ok(screenshot);
-      done();
     });
   });
 
@@ -192,6 +200,14 @@ describeWd('calc app', function(h) {
           });
         });
       });
+    });
+  });
+
+  it('should receive correct error', function(done) {
+    h.driver.execute("mobile: doesn't exist", function(err) {
+      should.exist(err);
+      err.cause.value.message.should.equal("Not yet implemented. Please help us: http://appium.io/get-involved.html");
+      done();
     });
   });
 });

@@ -4,6 +4,8 @@
 var status = require('./uiauto/lib/status')
   , logger = require('../logger.js').get('appium')
   , _s = require("underscore.string")
+  , swig = require('swig')
+  , path = require('path')
   , _ = require('underscore');
 
 function getResponseHandler(req, res) {
@@ -11,9 +13,17 @@ function getResponseHandler(req, res) {
     if (typeof response === "undefined" || response === null) {
       response = {};
     }
-    if (err !== null) {
-      if (typeof err.name !== "undefined" && err.name == 'NotImplementedError') {
-        notImplementedInThisContext(req, res);
+    if (err !== null && typeof err !== "undefined" && typeof err.status !== 'undefined' && typeof err.value !== 'undefined') {
+      throw new Error("Looks like you passed in a response object as the " +
+                      "first param to getResponseHandler. Err is always the " +
+                      "first param! Fix your codes!");
+    } else if (err !== null && typeof err !== "undefined") {
+      if (typeof err.name !== 'undefined') {
+        if (err.name == 'NotImplementedError') {
+          notImplementedInThisContext(req, res);
+        } else if (err.name == "NotYetImplementedError") {
+          exports.notYetImplemented(req, res);
+        }
       } else {
         var value = response.value;
         if (typeof value === "undefined") {
@@ -52,6 +62,8 @@ var respondError = function(req, res, statusObj, value) {
   var newValue = value;
   if (typeof statusObj === "string") {
     message = statusObj;
+  } else if (typeof statusObj === "undefined") {
+    message = "undefined status object";
   } else if (typeof statusObj === "number") {
     code = statusObj;
     message = status.getSummaryByCode(code);
@@ -63,7 +75,14 @@ var respondError = function(req, res, statusObj, value) {
   }
 
   if (typeof newValue === "object") {
+    if (newValue !== null && _.has(value, "message")) {
+      // make sure this doesn't get obliterated
+      value.origValue = value.message;
+      message += " (Original error: " + value.message + ")";
+    }
     newValue = _.extend({message: message}, value);
+  } else {
+    newValue = {message: message, origValue: value};
   }
   var response = {status: code, value: newValue};
   response.sessionId = getSessionId(req, response);
@@ -77,14 +96,24 @@ var respondSuccess = function(req, res, value, sid) {
   if (typeof response.value === "undefined") {
     response.value = '';
   }
-  logger.info("Responding to client with success: " + JSON.stringify(response));
+  var printResponse = _.clone(response);
+  var maxLen = 1000;
+  if (printResponse.value !== null &&
+      typeof printResponse.value.length !== "undefined" &&
+      printResponse.value.length > maxLen) {
+    printResponse.value = printResponse.value.slice(0, maxLen) + "...";
+  }
+  logger.info("Responding to client with success: " + JSON.stringify(printResponse));
   res.send(response);
 };
 
-var checkMissingParams = function(res, params) {
+var checkMissingParams = function(res, params, strict) {
+  if (typeof strict === "undefined") {
+    strict = false;
+  }
   var missingParamNames = [];
   _.each(params, function(param, paramName) {
-    if (typeof param === "undefined") {
+    if (typeof param === "undefined" || (strict && !param)) {
       missingParamNames.push(paramName);
     }
   });
@@ -117,31 +146,34 @@ exports.getStatus = function(req, res) {
 };
 
 exports.createSession = function(req, res) {
+  if (typeof req.body === 'string') {
+    req.body = JSON.parse(req.body);
+  }
+
   var desired = req.body.desiredCapabilities;
-  var next = function(sessionId, device, preLaunched) {
+
+  var next = function(reqHost, sessionId, device) {
     var redirect = function() {
-      res.set('Location', "/wd/hub/session/" + sessionId);
+      res.set('Location', "http://"+reqHost+"/wd/hub/session/" + sessionId);
       res.send(303);
     };
     if (desired && desired.newCommandTimeout) {
       device.setCommandTimeout(desired.newCommandTimeout, redirect);
-    } else if (preLaunched) {
-      // reset timeout to something more reasonable
-      device.resetCommandTimeout(redirect);
     } else {
       redirect();
     }
   };
   if (req.appium.preLaunched && req.appium.sessionId) {
     req.appium.preLaunched = false;
-    next(req.appium.sessionId, req.appium.device, true);
+    next(req.headers.host, req.appium.sessionId, req.appium.device, true);
   } else {
     req.appium.start(req.body.desiredCapabilities, function(err, instance) {
       if (err) {
         logger.error("Failed to start an Appium session, err was: " + err);
-        respondError(req, res, status.codes.NoSuchDriver);
+        respondError(req, res, status.codes.NoSuchDriver, err);
       } else {
-        next(req.appium.sessionId, instance);
+        logger.info("Appium session started with sessionId " + req.appium.sessionId);
+        next(req.headers.host, req.appium.sessionId, instance);
       }
     });
   }
@@ -153,26 +185,48 @@ exports.getSession = function(req, res) {
 };
 
 exports.getSessions = function(req, res) {
-  respondSuccess(req, res,
-      [{id: req.appium.sessionId , capabilities: req.device.capabilities}]);
+  var sessions = [];
+  if (req.appium.sessionId !== null) {
+    sessions.push({
+      id: req.appium.sessionId
+      , capabilities: req.device.capabilities
+    });
+  }
+
+  respondSuccess(req, res, sessions);
+};
+
+exports.reset = function(req, res) {
+  req.appium.reset(getResponseHandler(req, res));
 };
 
 exports.deleteSession = function(req, res) {
   req.appium.stop(getResponseHandler(req, res));
 };
 
+exports.equalsElement = function(req, res) {
+  var element = req.params.elementId
+    , other = req.params.otherId;
+
+  req.device.equalsWebElement(element, other, getResponseHandler(req, res));
+};
+
 exports.findElements = function(req, res) {
   var strategy = req.body.using
     , selector = req.body.value;
 
-  req.device.findElements(strategy, selector, getResponseHandler(req, res));
+  if (checkMissingParams(res, {strategy: strategy, selector: selector}, true)) {
+    req.device.findElements(strategy, selector, getResponseHandler(req, res));
+  }
 };
 
 exports.findElement = function(req, res) {
   var strategy = req.body.using
     , selector = req.body.value;
 
-  req.device.findElement(strategy, selector, getResponseHandler(req, res));
+  if (checkMissingParams(res, {strategy: strategy, selector: selector}, true)) {
+    req.device.findElement(strategy, selector, getResponseHandler(req, res));
+  }
 };
 
 exports.findElementFromElement = function(req, res) {
@@ -201,6 +255,12 @@ exports.setValue = function(req, res) {
 exports.doClick = function(req, res) {
   var elementId = req.params.elementId;
   req.device.click(elementId, getResponseHandler(req, res));
+};
+
+exports.fireEvent = function(req, res) {
+  var elementId = req.body.element
+    , evt = req.body.event;
+  req.device.fireEvent(evt, elementId, getResponseHandler(req, res));
 };
 
 exports.mobileTap = function(req, res) {
@@ -244,6 +304,25 @@ exports.mobileFlick = function(req, res) {
   }
 };
 
+exports.mobileSource = function(req, res) {
+  var type = req.body.type;
+
+  if(checkMissingParams(res, {type: type})) {
+    if (type.toLowerCase() === "xml") {
+      req.device.getPageSourceXML(getResponseHandler(req, res));
+    } else {
+      req.device.getPageSource(getResponseHandler(req, res));
+    }
+  }
+};
+
+exports.find = function(req, res) {
+  var strategy = "dynamic"
+    , selector = req.body;
+
+  req.device.findElements(strategy, selector, getResponseHandler(req, res));
+};
+
 exports.mobileSwipe = function(req, res) {
   var onElement = typeof req.body.element !== "undefined";
   req.body = _.defaults(req.body, {
@@ -284,11 +363,24 @@ exports.getText = function(req, res) {
   req.device.getText(elementId, getResponseHandler(req, res));
 };
 
+exports.getName = function(req, res) {
+  var elementId = req.params.elementId;
+
+  req.device.getName(elementId, getResponseHandler(req, res));
+};
+
 exports.getAttribute = function(req, res) {
   var elementId = req.params.elementId
     , attributeName = req.params.name;
 
   req.device.getAttribute(elementId, attributeName, getResponseHandler(req, res));
+};
+
+exports.getCssProperty = function(req, res) {
+  var elementId = req.params.elementId
+    , propertyName = req.params.propertyName;
+
+  req.device.getCssProperty(elementId, propertyName, getResponseHandler(req, res));
 };
 
 exports.getLocation = function(req, res) {
@@ -312,21 +404,37 @@ exports.getPageIndex = function(req, res) {
   req.device.getPageIndex(elementId, getResponseHandler(req, res));
 };
 
-exports.keys = function(req, res) {
-  var elementId = req.params.elementId
-    , keys = req.body.value.join('');
+exports.keyevent = function(req, res) {
+  var keycode = req.body.keycode;
+  req.device.keyevent(keycode, getResponseHandler(req, res));
+};
 
-  req.device.keys(elementId, keys, getResponseHandler(req, res));
+exports.back = function(req, res) {
+  req.device.back(getResponseHandler(req, res));
+};
+
+exports.forward = function(req, res) {
+  req.device.forward(getResponseHandler(req, res));
+};
+
+exports.refresh = function(req, res) {
+  req.device.refresh(getResponseHandler(req, res));
+};
+
+exports.keys = function(req, res) {
+  var keys = req.body.value.join('');
+
+  req.device.keys(keys, getResponseHandler(req, res));
 };
 
 exports.frame = function(req, res) {
   var frame = req.body.id;
 
-  if (frame === null) {
-    req.device.clearWebView(getResponseHandler(req, res));
-  } else {
-    req.device.frame(frame, getResponseHandler(req, res));
-  }
+  req.device.frame(frame, getResponseHandler(req, res));
+};
+
+exports.leaveWebView = function(req, res) {
+  req.device.leaveWebView(getResponseHandler(req, res));
 };
 
 exports.elementDisplayed = function(req, res) {
@@ -340,12 +448,22 @@ exports.elementEnabled = function(req, res) {
   req.device.elementEnabled(elementId, getResponseHandler(req, res));
 };
 
+exports.elementSelected = function(req, res) {
+  var elementId = req.params.elementId;
+  req.device.elementSelected(elementId, getResponseHandler(req, res));
+};
+
 exports.getPageSource = function(req, res) {
   req.device.getPageSource(getResponseHandler(req, res));
 };
 
 exports.getAlertText = function(req, res) {
   req.device.getAlertText(getResponseHandler(req, res));
+};
+
+exports.setAlertText = function(req, res) {
+  var text = req.body.text;
+  req.device.setAlertText(text, getResponseHandler(req, res));
 };
 
 exports.postAcceptAlert = function(req, res) {
@@ -357,8 +475,13 @@ exports.postDismissAlert = function(req, res) {
 };
 
 exports.implicitWait = function(req, res) {
-  var seconds = req.body.ms / 1000;
-  req.device.implicitWait(seconds, getResponseHandler(req, res));
+  var ms = req.body.ms;
+  req.device.implicitWait(ms, getResponseHandler(req, res));
+};
+
+exports.asyncScriptTimeout = function(req, res) {
+  var ms = req.body.ms;
+  req.device.asyncScriptTimeout(ms, getResponseHandler(req, res));
 };
 
 exports.setOrientation = function(req, res) {
@@ -372,6 +495,18 @@ exports.getOrientation = function(req, res) {
 
 exports.getScreenshot = function(req, res) {
   req.device.getScreenshot(getResponseHandler(req, res));
+};
+
+exports.moveTo = function(req, res) {
+  var xoffset = req.body.xoffset
+    , yoffset = req.body.yoffset
+    , element = req.body.element;
+  req.device.moveTo(element, xoffset, yoffset, getResponseHandler(req, res));
+};
+
+exports.clickCurrent = function(req, res) {
+  var button = req.body.button || 0;
+  req.device.clickCurrent(button, getResponseHandler(req, res));
 };
 
 exports.pickAFlickMethod = function(req, res) {
@@ -429,6 +564,19 @@ exports.execute = function(req, res) {
   }
 };
 
+exports.executeAsync = function(req, res) {
+  var script = req.body.script
+    , args = req.body.args
+    , responseUrl = '';
+
+    responseUrl += 'http://' + req.appium.args.address + ':' + req.appium.args.port;
+    responseUrl += '/wd/hub/session/' + req.appium.sessionId + '/receive_async_response';
+
+  if(checkMissingParams(res, {script: script, args: args})) {
+    req.device.executeAsync(script, args, responseUrl, getResponseHandler(req, res));
+    }
+};
+
 exports.executeMobileMethod = function(req, res, cmd) {
   var args = req.body.args
     , params = {};
@@ -455,12 +603,21 @@ exports.title = function(req, res) {
   req.device.title(getResponseHandler(req, res));
 };
 
+exports.submit = function(req, res) {
+  var elementId = req.params.elementId;
+  req.device.submit(elementId, getResponseHandler(req, res));
+};
+
 exports.postUrl = function(req, res) {
   var url = req.body.url;
 
   if(checkMissingParams(res, {url: url})) {
     req.device.url(url, getResponseHandler(req, res));
   }
+};
+
+exports.getUrl = function(req, res) {
+  req.device.getUrl(getResponseHandler(req, res));
 };
 
 exports.active = function(req, res) {
@@ -477,6 +634,10 @@ exports.setWindow = function(req, res) {
   if(checkMissingParams(res, {name: name})) {
     req.device.setWindow(name, getResponseHandler(req, res));
   }
+};
+
+exports.closeWindow = function(req, res) {
+  req.device.closeWindow(getResponseHandler(req, res));
 };
 
 exports.getWindowHandles = function(req, res) {
@@ -496,12 +657,66 @@ exports.getCommandTimeout = function(req, res) {
   req.device.getCommandTimeout(getResponseHandler(req, res));
 };
 
+exports.receiveAsyncResponse = function(req, res) {
+  var asyncResponse = req.body;
+  req.device.receiveAsyncResponse(asyncResponse);
+};
+
 exports.setValueImmediate = function(req, res) {
   var element = req.body.element
     , value = req.body.value;
-	if (checkMissingParams(res, {element: element, value: value})) {
-		req.device.setValueImmediate(element, value, getResponseHandler(req,res));
-	}
+  if (checkMissingParams(res, {element: element, value: value})) {
+    req.device.setValueImmediate(element, value, getResponseHandler(req, res));
+  }
+};
+
+exports.findAndAct = function(req, res) {
+  var params = {
+    strategy: req.body.strategy
+    , selector: req.body.selector
+    , index: req.body.index
+    , action: req.body.action
+    , actionParams: req.body.params
+  };
+
+  if (typeof params.action === "undefined") {
+    params.action = "tap";
+  }
+  if (typeof params.index === "undefined") {
+    params.index = 0;
+  }
+  params.index = parseInt(params.index, 10);
+  if (typeof params.actionParams === "undefined") {
+    params.actionParams = [];
+  }
+  if (checkMissingParams(res, params)) {
+    req.device.findAndAct(params.strategy, params.selector, params.index,
+        params.action, params.actionParams, getResponseHandler(req, res));
+  }
+};
+
+exports.getCookies = function(req, res) {
+  req.device.getCookies(getResponseHandler(req, res));
+};
+
+exports.setCookie = function(req, res) {
+  var cookie = req.body.cookie;
+  if (checkMissingParams(res, {cookie: cookie})) {
+    if (typeof cookie.name !== "string" || typeof cookie.value !== "string") {
+      return respondError(req, res, status.codes.UnknownError,
+          "setCookie requires cookie of form {name: 'xxx', value: 'yyy'}");
+    }
+    req.device.setCookie(cookie, getResponseHandler(req, res));
+  }
+};
+
+exports.deleteCookie = function(req, res) {
+  var cookie = req.params.name;
+  req.device.deleteCookie(cookie, getResponseHandler(req, res));
+};
+
+exports.deleteCookies = function(req, res) {
+  req.device.deleteCookies(getResponseHandler(req, res));
 };
 
 exports.unknownCommand = function(req, res) {
@@ -515,8 +730,10 @@ exports.notYetImplemented = function(req, res) {
   res.send(501, {
     status: status.codes.UnknownError.code
     , sessionId: getSessionId(req)
-    , value: "Not yet implemented. " +
-             "Please help us: http://appium.io/get-involved.html"
+    , value: {
+      message: "Not yet implemented. " +
+               "Please help us: http://appium.io/get-involved.html"
+    }
   });
 };
 
@@ -526,8 +743,10 @@ var notImplementedInThisContext = function(req, res) {
   res.send(501, {
     status: status.codes.UnknownError.code
     , sessionId: getSessionId(req)
-    , value: "Not implemented in this context, try switching " +
-             "into or out of a web view"
+    , value: {
+      message: "Not implemented in this context, try switching " +
+               "into or out of a web view"
+    }
   });
 };
 
@@ -538,7 +757,14 @@ var mobileCmdMap = {
   , 'hideKeyboard': exports.hideKeyboard
   , 'setCommandTimeout': exports.setCommandTimeout
   , 'getCommandTimeout': exports.getCommandTimeout
+  , 'findAndAct': exports.findAndAct
   , 'setValue' : exports.setValueImmediate
+  , 'reset' : exports.reset
+  , 'keyevent' : exports.keyevent
+  , 'leaveWebView': exports.leaveWebView
+  , 'fireEvent': exports.fireEvent
+  , 'source': exports.mobileSource
+  , 'find': exports.find
 };
 
 exports.produceError = function(req, res) {
@@ -547,4 +773,25 @@ exports.produceError = function(req, res) {
 
 exports.crash = function() {
   throw new Error("We just tried to crash Appium!");
+};
+
+exports.guineaPig = function(req, res) {
+  var params = {
+    serverTime: parseInt(new Date().getTime() / 1000, 10)
+    , userAgent: req.headers['user-agent']
+    , comment: "None"
+  };
+  if (req.method === "POST") {
+    params.comment = req.body.comments || params.comment;
+  }
+  res.set('Content-Type', 'text/html');
+  res.cookie('guineacookie1', 'i am a cookie value', {path: '/'});
+  res.cookie('guineacookie2', 'cookié2', {path: '/'});
+  res.cookie('guineacookie3', 'cant access this', {
+    domain: '.blargimarg.com', path: '/'});
+  res.send(exports.getTemplate('guinea-pig').render(params));
+};
+
+exports.getTemplate = function(templateName) {
+  return swig.compileFile(path.resolve(__dirname, "templates/" + templateName + ".html"));
 };
