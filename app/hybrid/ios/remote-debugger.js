@@ -41,8 +41,10 @@ var RemoteDebugger = function(onDisconnect) {
   this.pageIdKey = null;
   this.pageLoading = false;
   this.curMsgId = 0;
-  this.dataCbs = [];
+  this.dataCbs = {};
+  this.willNavigateWithoutReload = false;
   this.onAppDisconnect = onDisconnect || noop;
+  this.pageChangeCb = noop;
   this.specialCbs = {
     '_rpc_reportIdentifier:': noop
     , '_rpc_forwardGetListing:': noop
@@ -58,8 +60,9 @@ var RemoteDebugger = function(onDisconnect) {
 // API
 // ====================================
 
-RemoteDebugger.prototype.connect = function(cb) {
+RemoteDebugger.prototype.connect = function(cb, pageChangeCb) {
   var me = this;
+  this.pageChangeCb = pageChangeCb;
   this.socket = new net.Socket({type: 'tcp6'});
   this.socket.on('close', function() {
     logger.info('Debugger socket disconnected');
@@ -75,7 +78,8 @@ RemoteDebugger.prototype.connect = function(cb) {
 };
 
 RemoteDebugger.prototype.disconnect = function() {
-  this.socket.close();
+  logger.info("Disconnecting from remote debugger");
+  this.socket.destroy();
 };
 
 RemoteDebugger.prototype.setConnectionKey = function(cb) {
@@ -99,50 +103,151 @@ RemoteDebugger.prototype.selectApp = function(appIdKey, cb) {
   this.appIdKey = appIdKey;
   var connectToApp = messages.connectToApp(this.connId, this.appIdKey);
   logger.info("Selecting app");
-  this.send(connectToApp, function(pageDict) {
-    var newPageArray = [];
-    _.each(pageDict, function(dict) {
-      newPageArray.push({
-        id: dict.WIRPageIdentifierKey
-        , title: dict.WIRTitleKey
-        , url: dict.WIRURLKey
-      });
-    });
-    cb(newPageArray);
-  });
+  this.send(connectToApp, _.bind(function(pageDict) {
+    cb(this.pageArrayFromDict(pageDict));
+    this.specialCbs['_rpc_forwardGetListing:'] = _.bind(this.onPageChange, this);
+  }, this));
 };
 
-RemoteDebugger.prototype.selectPage = function(pageIdKey, cb) {
+RemoteDebugger.prototype.pageArrayFromDict = function(pageDict) {
+  var newPageArray = [];
+  _.each(pageDict, function(dict) {
+    newPageArray.push({
+      id: dict.WIRPageIdentifierKey
+      , title: dict.WIRTitleKey
+      , url: dict.WIRURLKey
+      , isKey: typeof dict.WIRConnectionIdentifierKey !== "undefined"
+    });
+  });
+  return newPageArray;
+};
+
+RemoteDebugger.prototype.selectPage = function(pageIdKey, cb, skipReadyCheck) {
   var me = this;
+  if (typeof skipReadyCheck === "undefined") {
+    skipReadyCheck = false;
+  }
   assert.ok(this.connId); assert.ok(this.appIdKey); assert.ok(this.senderId);
   this.pageIdKey = pageIdKey;
   var setSenderKey = messages.setSenderKey(this.connId, this.appIdKey,
                                            this.senderId, this.pageIdKey);
-  logger.info("Selecting page and forwarding socket setup");
+  logger.info("Selecting page " + pageIdKey + " and forwarding socket setup");
   this.send(setSenderKey, function() {
+    logger.info("Set sender key");
     var enablePage = messages.enablePage(me.appIdKey, me.connId,
                                          me.senderId, me.pageIdKey);
     me.send(enablePage, function() {
-      me.execute('(function(){return document.readyState;})()', function(err, res) {
-        if (err || res.result.value == 'loading') {
-          me.pageUnload();
-        }
+      logger.info("Enabled activity on page");
+      if (skipReadyCheck) {
         cb();
-      }, 0);
+      } else {
+        me.execute('(function(){return document.readyState;})()', function(err, res) {
+          logger.info("Checked document readystate");
+          if (err || res.result.value == 'loading') {
+            me.pageUnload();
+          }
+          cb();
+        });
+      }
     });
   });
 };
 
-RemoteDebugger.prototype.executeAtom = function(atom, args, cb) {
-  var atomSrc = atoms.get(atom);
+RemoteDebugger.prototype.onPageChange = function(pageDict) {
+  this.pageChangeCb(this.pageArrayFromDict(pageDict));
+};
+
+RemoteDebugger.prototype.wrapScriptForFrame = function(script, frame) {
+    var elFromCache = atoms.get('get_element_from_cache')
+      , wrapper = "";
+    logger.info("Wrapping script for frame " + frame);
+    frame = JSON.stringify(frame);
+    wrapper += "(function(window) { var document = window.document; ";
+    wrapper += "return (" + script + ");";
+    wrapper += "})((" + elFromCache + ")(" + frame + "))";
+    return wrapper;
+};
+
+RemoteDebugger.prototype.wrapElementEqualsElementAtom = function(args) {
+    var elFromCache = atoms.get('get_element_from_cache');
+    var wrapper = "function() {";
+        wrapper += "var elFromCache = (function(id){ "
+        wrapper += "try {";
+        wrapper += "(" + elFromCache + ")(id); "
+        wrapper += "} catch(e) {";
+        wrapper += "return null;"
+        wrapper += "}"
+        wrapper += "});";
+        wrapper += "return (function(a, b) {";
+        wrapper += "if (a === null || b === null) { return JSON.stringify({status: 10, value: null});}"
+        wrapper += "return JSON.stringify({status: 0, value: a === b});"
+        wrapper += "})("
+        wrapper += "elFromCache(\"" + args[0] + "\"),";
+        wrapper += "elFromCache(\"" + args[1] + "\")";
+        wrapper += ");}";
+
+    return wrapper;
+};
+
+RemoteDebugger.prototype.wrapJsEventAtom = function(args) {
+  var elFromCache = atoms.get('get_element_from_cache');
+  var wrapper = "function() {";
+      wrapper += "var elFromCache = (function(id){ ";
+      wrapper += "try {";
+      wrapper += "return (" + elFromCache + ")(id); ";
+      wrapper += "} catch(e) {";
+      wrapper += "return null;";
+      wrapper += "}";
+      wrapper += "});";
+      wrapper += "return (function(el) {";
+      wrapper += "var evt = document.createEvent('HTMLEvents');";
+      wrapper += "evt.initEvent('" + args[0] + "', false, true);";
+      wrapper += "el.dispatchEvent(evt);";
+      wrapper += "return JSON.stringify({status: 0, value: true});";
+      wrapper += "})(";
+      wrapper += "elFromCache(" + JSON.stringify(args[1].ELEMENT) + ")";
+      wrapper += ");}";
+  return wrapper;
+};
+
+RemoteDebugger.prototype.executeAtom = function(atom, args, frames, cb) {
+  var atomSrc, script = "";
+  if (atom === "title") {
+    atomSrc = "function(){return JSON.stringify({status: 0, value: document.title});}";
+  } else if (atom === "element_equals_element") {
+    atomSrc = this.wrapElementEqualsElementAtom(args);
+  } else if (atom === "refresh") {
+    atomSrc = "function(){return JSON.stringify({status: 0, value: window.location.reload()});}";
+  } else if (atom === "fireEvent") {
+    atomSrc = this.wrapJsEventAtom(args);
+  } else {
+    atomSrc = atoms.get(atom);
+  }
   args = _.map(args, JSON.stringify);
-  this.execute(['(',atomSrc,')(',args.join(','),')'].join(''), function(err, res) {
+  if (frames.length > 0) {
+    script = atomSrc;
+    for (var i = 0; i < frames.length; i++) {
+      script = this.wrapScriptForFrame(script, frames[i]);
+    }
+    script += "(" + args.join(',') + ")";
+  } else {
+    logger.info("Executing '" + atom + "' atom in default context");
+    script += "(" + atomSrc + ")(" + args.join(',') + ")";
+  }
+  this.execute(script, function(err, res) {
     if (err) {
       cb(err, {
         status: status.codes.UnknownError.code
         , value: res
       });
     } else {
+      if (typeof res.result.value === "undefined") {
+        return cb(null, {
+          status: status.codes.UnknownError.code
+          , value: "Did not get OK result from execute(). Result was: " +
+                   JSON.stringify(res.result)
+        });
+      }
       if (typeof res.result.value === 'string') {
         res.result.value = JSON.parse(res.result.value);
       }
@@ -151,9 +256,39 @@ RemoteDebugger.prototype.executeAtom = function(atom, args, cb) {
   });
 };
 
+RemoteDebugger.prototype.executeAtomAsync = function(atom, args, frames, responseUrl, cb) {
+  var atomSrc, script = ""
+    , asyncCallBack = "";
+
+  asyncCallBack += "function(res) { xmlHttp = new XMLHttpRequest(); xmlHttp.open('POST', '" + responseUrl + "', true);"
+  asyncCallBack += "xmlHttp.setRequestHeader('Content-type','application/json'); xmlHttp.send(res); }"
+
+  atomSrc = atoms.get(atom);
+  args = _.map(args, JSON.stringify);
+  if (frames.length > 0) {
+    script = atomSrc;
+    for (var i = 0; i < frames.length; i++) {
+      script = this.wrapScriptForFrame(script, frames[i]);
+    }
+    script += "(" + args.join(',') + ", " + asyncCallBack + ", true )";
+  } else {
+    logger.info("Executing atom in default context");
+    script += "(" + atomSrc + ")(" + args.join(',') + ", " + asyncCallBack + ", true )";
+  }
+  this.execute(script, function(err, res) {
+    if (err) {
+      cb(err, {
+        status: status.codes.UnknownError.code
+        , value: res
+      });
+    }
+  });
+};
+
 RemoteDebugger.prototype.execute = function(command, cb) {
   var me = this;
   if (this.pageLoading) {
+    logger.info("Trying to execute but page is not loaded. Waiting for dom");
     this.waitForDom(function() {
       me.execute(command, cb);
     });
@@ -198,9 +333,9 @@ RemoteDebugger.prototype.pageLoad = function() {
 };
 
 RemoteDebugger.prototype.pageUnload = function() {
-      logger.debug("Page loading");
-      this.pageLoading = true;
-      this.waitForDom(noop);
+  logger.debug("Page loading");
+  this.pageLoading = true;
+  this.waitForDom(noop);
 };
 
 RemoteDebugger.prototype.waitForDom = function(cb) {
@@ -229,7 +364,10 @@ RemoteDebugger.prototype.handleMessage = function(plist) {
 RemoteDebugger.prototype.handleSpecialMessage = function(specialCb) {
   var fn = this.specialCbs[specialCb];
   if (fn) {
-    this.specialCbs[specialCb] = null;
+    if (specialCb != "_rpc_forwardGetListing:") {
+      this.specialCbs[specialCb] = null;
+    } else {
+    }
     fn.apply(this, _.rest(arguments));
   }
 };
@@ -255,22 +393,36 @@ RemoteDebugger.prototype.setHandlers = function() {
       , msgId = dataKey.id
       , result = dataKey.result
       , error = dataKey.error || null;
+      if (msgId !== null && typeof msgId !== "undefined") {
+        msgId = msgId.toString();
+      }
       if (dataKey.method == "Profiler.resetProfiles") {
         logger.info("Device is telling us to reset profiles. Should probably " +
                     "do some kind of callback here");
+        //me.onPageChange();
       } else if (dataKey.method == "Page.frameNavigated") {
-        me.pageUnload();
+        if (!me.willNavigateWithoutReload) {
+          me.pageUnload();
+        } else {
+          logger.info("Frame navigated but we were warned about it, not " +
+                      "considering page state unloaded");
+          me.willNavigateWithoutReload = false;
+        }
       } else if (dataKey.method == "Page.loadEventFired") {
         me.pageLoad();
       } else if (typeof me.dataCbs[msgId] === "function") {
         me.dataCbs[msgId](error, result);
+        me.dataCbs[msgId] = null;
+      } else if (me.dataCbs[msgId] === null) {
+        logger.error("Debugger returned data for message " + msgId +
+                     "but we already ran that callback! WTF??");
       } else {
         if (!msgId && !result && !error) {
           logger.info("Got a blank data response from debugger");
         } else {
           logger.error("Debugger returned data for message " + msgId +
                       " but we weren't waiting for that message! " +
-                      " result: " + result +
+                      " result: " + JSON.stringify(result) +
                       " error: " + error);
         }
       }
@@ -296,8 +448,14 @@ RemoteDebugger.prototype.send = function (data, cb, cb2) {
       this.specialCbs.connect = cb2;
     }
   } else if( data.__argument && data.__argument.WIRSocketDataKey ) {
+    //console.log("MsgId was " + this.curMsgId);
     this.curMsgId += 1;
-    this.dataCbs[this.curMsgId] = cb;
+    //console.log("Giving message new id of " + this.curMsgId);
+    this.dataCbs[this.curMsgId.toString()] = cb;
+    //_.each(this.dataCbs, function(cb, msgId) {
+      //console.log(msgId + ": " + cb);
+    //});
+    //console.log(JSON.stringify(this.dataCbs));
     data.__argument.WIRSocketDataKey.id = this.curMsgId;
     data.__argument.WIRSocketDataKey = new
       Buffer(JSON.stringify(data.__argument.WIRSocketDataKey));
@@ -305,8 +463,10 @@ RemoteDebugger.prototype.send = function (data, cb, cb2) {
     immediateCb = true;
   }
 
-  logger.debug("Sending message to remote debugger:");
-  logger.debug(util.inspect(data, false, null));
+  logger.debug("Sending " + data.__selector + " message to remote debugger");
+  if (data.__selector !== "_rpc_forwardSocketData:") {
+    logger.debug(util.inspect(data, false, null));
+  }
 
   try {
     plist = bplistCreate(data);
@@ -370,7 +530,22 @@ RemoteDebugger.prototype.receive = function(data) {
       plist = plist[0];
     }
 
-    logger.debug(util.inspect(plist, false, null));
+    var plistCopy = plist;
+    if (typeof plistCopy.WIRMessageDataKey !== "undefined") {
+      plistCopy.WIRMessageDataKey = plistCopy.WIRMessageDataKey.toString("utf8");
+    }
+    if (typeof plistCopy.WIRDestinationKey !== "undefined") {
+      plistCopy.WIRDestinationKey = plistCopy.WIRDestinationKey.toString("utf8");
+    }
+    if (typeof plistCopy.WIRSocketDataKey !== "undefined") {
+      plistCopy.WIRSocketDataKey = plistCopy.WIRSocketDataKey.toString("utf8");
+    }
+
+    if (plistCopy.__selector === "_rpc_applicationSentData:") {
+      logger.debug("<applicationSentData response>");
+    } else {
+      logger.debug(util.inspect(plistCopy, false, null));
+    }
 
     // Jump forward the length of the plist
     this.readPos += msgLength;

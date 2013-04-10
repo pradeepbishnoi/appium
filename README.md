@@ -4,29 +4,32 @@ Appium
 [![Build Status](https://api.travis-ci.org/appium/appium.png?branch=master)](https://travis-ci.org/appium/appium)
 
 Appium is an open source test automation tool for native and hybrid
-mobile apps. It supports iOS today and Android support is in the
-works. Appium drives Apple's UIAutomation library using Selenium's
+mobile apps. It supports both iOS and Android. Appium drives Apple's
+UIAutomation library and Android's UiAutomator using Selenium's
 WebDriver JSON wire protocol. Appium is based on
 [Dan Cuellar's](http://github.com/penguinho) work on iOS Auto.
 
 Testing with Appium has two big benefits:
 
-1.  You don't have to recompile your app or modify it in any way because
-    Appium's automation is based on Apple's UIAutomation library.
+1.  You don't have to recompile your app or modify it in any way, due
+    to use of standard automation APIs on all platforms.
 
-2.  You can write tests with your favorite dev tools using Java, JavaScript,
-    PHP, Python, Ruby, C#, or Perl with the Selenium WebDriver API and
-    language-specific client libraries. If you use the UIAutomation library
-    without Appium you can only write tests using JavaScript and you can only
-    run tests through the Instruments application.
+2.  You can write tests with your favorite dev tools using Java,
+    Objective-C, JavaScript, PHP, Python, Ruby, C#, or Perl with the Selenium
+    WebDriver API and language-specific client libraries. You can use
+    any testing framework. If you use the UIAutomation library without
+    Appium you can only write tests using JavaScript and you can only
+    run tests through the Instruments application. Similarly, with
+    UiAutomator you can only write tests in Java.
 
 Requirements
 ------------
 
     > Mac OS X 10.6 or higher
     > XCode
-    > Apple Developer Tools (iPhone simulator, command line tools)
-    > Node and npm (http://www.nodejs.org)
+    > Apple Developer Tools (iPhone simulator SDK, command line tools)
+    > Android SDK API >= 17
+    > Node and npm (http://www.nodejs.org) (Node must be >= v0.8)
 
 User Quick Start
 ------------
@@ -41,7 +44,9 @@ Get something working with a quickness.
 
 Example Tests: [Node.js](https://github.com/appium/appium/tree/master/sample-code/examples/node) | [Python](https://github.com/appium/appium/tree/master/sample-code/examples/python) | [PHP](https://github.com/appium/appium/tree/master/sample-code/examples/php) | [Ruby](https://github.com/appium/appium/tree/master/sample-code/examples/ruby) | [Java](https://github.com/appium/appium/tree/master/sample-code/examples/java)
 
-We support a sub-set of the [Selenium JSON Wire Protocol](https://github.com/appium/appium/wiki/JSON-Wire-Protocol:-Supported-Methods).
+More Detailed Information
+-------------------
+We support a sub-set of the [Selenium WebDriver JSON Wire Protocol](https://github.com/appium/appium/wiki/JSON-Wire-Protocol:-Supported-Methods).
 
 We also have several extensions to the JSON Wire Protocol for [automating
 mobile
@@ -51,6 +56,15 @@ like tap, flick, and swipe.
 You can also automate web views in hybrid apps! See the [hybrid app
 guide](https://github.com/appium/appium/wiki/Testing-Hybrid-Apps)
 
+We support Android and iOS platforms side-by-side:
+
+* [Set up your system for Appium iOS support](https://github.com/appium/appium/blob/master/docs/system-setup.md#ios)
+* [Set up your system for Appium Android support](https://github.com/appium/appium/blob/master/docs/system-setup.md#android)
+* [Prepare your app for an iOS test](https://github.com/appium/appium/blob/master/docs/running-tests.md#prep-ios)
+* [Prepare your app for an Android test](https://github.com/appium/appium/blob/master/docs/running-tests.md#prep-ios)
+* [Run an iOS test](https://github.com/appium/appium/blob/master/docs/running-tests.md#run-ios)
+* [Run an Android test](https://github.com/appium/appium/blob/master/docs/running-tests.md#android-ios)
+* [Getting started with Appium and Ruby on OS X](https://github.com/appium/ruby_console/blob/master/osx.md)
 
 - - -
 
@@ -64,12 +78,18 @@ From your local repo clone's command prompt, install these packages using the
 following commands:
 
     > sudo npm install -g mocha
-    > sudo npm install -g grunt
-    > npm install
+    > sudo npm install -g grunt-cli
+    > ./reset.sh
 
 The first two commands install test and build tools (sudo may not be necessary
 if you installed node.js via Homebrew). The third command installs all app
-dependencies.
+dependencies, builds supporting binaries and test apps. `reset.sh` is also the
+recommended command to run after pulling changes from master.
+
+Developing on Appium (iOS)
+--------------
+
+(First, have a look at [setting up your system for Appium iOS support](https://github.com/appium/appium/blob/master/docs/system-setup.md#ios).)
 
 To avoid a security dialog that may appear when launching your iOS apps you'll
 have to modify your `/etc/authorization` file in one of two ways:
@@ -86,6 +106,37 @@ have to modify your `/etc/authorization` file in one of two ways:
 **Important Note:** Making this modification to your `/etc/authorization` file
 grants access privileges to all members belonging to your `_developer` group.
 
+Download the UICatalog test app:
+
+    > grunt downloadApp
+
+Build the test apps (if the functional tests fail, try running these grunt commands again):
+
+    > grunt buildApp:UICatalog
+    > grunt buildApp:TestApp
+    > grunt buildApp:WebViewApp
+
+Developing on Appium (Android)
+----------------
+
+(First, have a look at [setting up your system for Appium Android support](https://github.com/appium/appium/blob/master/docs/system-setup.md#android).)
+
+Configure the and build bootstrap .jar:
+
+    > grunt configAndroidBootstrap
+    > grunt buildAndroidBootstrap
+
+Configure and build the test app:
+
+    > grunt configAndroidApp:ApiDemos
+    > grunt buildAndroidApp:ApiDemos
+
+Make sure you have one and only one Android emulator or device running, e.g.
+by running this command in another process (assuming the `emulator` command is
+on your path):
+
+    > emulator -avd <MyAvdName>
+
 Making sure you're up to date
 -----------
 Since we use dev versions of some packages, it often becomes necessary to
@@ -96,17 +147,8 @@ to do all this:
 
 Running Tests
 -----------
-Download UICatalog:
-
-    > grunt downloadApp
-
-Build an app (if the functional tests fail, try running these grunt commands
-again):
-
-    > grunt buildApp:UICatalog
-    > grunt buildApp:TestApp
-
-Run all functional tests:
+Once, your system is set up and your code is up to date, you can run all the
+functional tests:
 
     > grunt functional
 
@@ -136,14 +178,9 @@ your changes against code quality standards:
 
     Done, without errors.
 
-More Stuff and Some Low-Level Tips
+Dig in deeper to Appium dev
 -----------
-By default, `grunt buildApp` builds apps using the iPhone 6.1 simulator SDK.
-You can overwrite the simulator by passing another SDK to grunt (to figure out
-which SDKs you have available, try `xcodebuild -showsdks`:
-
-    > grunt buildApp:UICatalog:iphonesimulator6.0
-
+### Advanced grunt
 If you want to run the Appium server and have it listen indefinitely, you can
 execute one of the following commands to start an Appium server with or without a specified app:
 
@@ -151,30 +188,34 @@ execute one of the following commands to start an Appium server with or without 
     > grunt appium:TestApp   // launch Appium server with the TestApp
     > grunt appium:UICatalog // launch Appium server with the UICatalog app
 
-Then you can run individual test files using Mocha, for example:
+Like the power of automating dev tasks? Check out the [Appium grunt
+tasks](https://github.com/appium/appium/blob/master/docs/grunt.md) available to
+help with building apps, installing apps, generating docs, etc...
+
+### Running individual tests
+
+If you have an Appium server listening, you can run individual test files using
+Mocha, for example:
 
     > mocha -t 60000 -R spec test/functional/testapp/simple.js
 
+### Advanced Appium server flags
+
 Do you like getting close to the metal? Or are you trying to launch an Appium
 server from a script with a custom app? If so you can start Appium without
-grunt from the command line with an app or without an app. (See
-[parser.js](https://github.com/appium/appium/blob/master/app/parser.js) for
-more CLI arguments.)
+grunt from the command line with an app or without an app, among other things:
 
-    > node server.js -V 1  // launch Appium server without app
-    > node server.js --app /absolute/path/to/app -V 1  // launch Appium server with app
-    > node server.js --launch 1 // pre-launch the app when appium loads
+    > node server.js -V  // launch Appium server without app
+    > node server.js --app /absolute/path/to/app -V  // launch Appium server with app
+    > node server.js --launch // pre-launch the app when appium loads
     > node server.js --log /my/appium.log // log to file instead of stdout
-    > node server.js --warp 1 // use unsupported system-crashing speedup tech
+    > node server.js --without-delay // (iOS) use faster instruments-without-delay
+    > node server.js --fast-reset // (Android) faster resetting between tests
 
-In this case, the app has to be compiled for the iPhone simulator, for example
-by executing the following command in the Xcode project:
+(See
+[the server documentation](https://github.com/appium/appium/blob/master/docs/server-args.md) for
+all CLI arguments.)
 
-    > xcodebuild -sdk iphonesimulator6.0
-
-This creates a `build/Release-iphonesimulator` directory in your Xcode project
-that contains the `.app` package that you'll need to communicate with the
-Appium server.
 
 Using with a [Bitbeambot](http://bitbeam.org)
 -----------
@@ -194,4 +235,4 @@ The open source community has made this project possible, please add missing pro
 
 Mailing List
 -----------
-[Discussion Group](https://groups.google.com/d/forum/appium-discuss)
+Announcements and debates often take place on the [Discussion Group](https://groups.google.com/d/forum/appium-discuss), be sure to sign up!

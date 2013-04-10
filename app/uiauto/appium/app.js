@@ -55,17 +55,34 @@ $.extend(au, {
           value: 'Unsupported orientation: ' + orientation
         };
       }
-      var newOrientation = au.getScreenOrientation();
+      // Need to wait a moment for the animation to complete.
+      // This might be better done with a callback
+      var now = Date.now();
+      while (Date.now() - now < 500) {
+        var i = 0;
+      }
+      var newOrientation = au.getScreenOrientation().value;
       if (newOrientation == orientation) {
-        return {
-          status: codes.Success.code
-          , value: newOrientation
-        };
+        var size = this.target.rect().size;
+        if ((newOrientation === "PORTRAIT" && size.width > size.height) ||
+            (newOrientation === "LANDSCAPE" && size.height > size.width)) {
+          return {
+            status: codes.UnknownError.code
+            , value: "Orientation took effect but window size did not change " +
+                     "to match. We expected " + JSON.stringify(size) + "to " +
+                     "match " + newOrientation
+          };
+        } else {
+          return {
+            status: codes.Success.code
+            , value: newOrientation
+          };
+        }
       } else {
-        console.log("returning error");
         return {
           status: codes.UnknownError.code
-          , value: "Orientation change did not take effect"
+          , value: "Orientation change did not take effect: expected " +
+                   orientation + " but got " + newOrientation
         };
       }
     }
@@ -82,7 +99,7 @@ $.extend(au, {
 
   , lookup: function(selector, ctx) {
       if (typeof selector === 'string') {
-        var _ctx = this.mainWindow
+        var _ctx = this.mainApp
           , elems = [];
 
         if (typeof ctx === 'string') {
@@ -165,6 +182,34 @@ $.extend(au, {
       };
   }
 
+  , elemForAction: function(elem, idx) {
+      // mock out action functions to respond with the error
+      var errRet = function() { return elem; };
+      var noElemMock = {};
+      var actions = ["tap", "isEnabled", "isValid", "isVisible", "value",
+                     "name", "label", "setValue"];
+      for (var i = 0; i < actions.length; i++) {
+        noElemMock[actions[i]] = errRet;
+      }
+      if (elem.status === codes.Success.code) {
+        if (typeof elem.value.ELEMENT === "undefined") {
+          // we have an array of elements
+          if (typeof elem.value[idx] === "undefined") {
+            return {
+              status: codes.NoSuchElement.code
+              , value: null
+            };
+          } else {
+            return au.getElement(elem.value[idx].ELEMENT);
+          }
+        } else {
+          return au.getElement(elem.value.ELEMENT);
+        }
+      } else {
+        return noElemMock;
+      }
+  }
+
   , getElementsByName: function(name, ctx) {
       var selector = ['#', name].join('')
         , elems;
@@ -234,7 +279,7 @@ $.extend(au, {
     }
 
   , getElementsByXpath: function(xpath, ctx) {
-      var _ctx = this.mainWindow
+      var _ctx = this.mainApp
         , elems = [];
 
       if (typeof ctx === 'string') {
@@ -283,7 +328,7 @@ $.extend(au, {
         results = this.getElementsByXpath(xpath);
       }
 
-      if (results.value.length < 1) {
+      if (results.value === null || results.value.length < 1) {
         return {
           status: codes.NoSuchElement.code,
           value: null
@@ -316,12 +361,16 @@ $.extend(au, {
       if (startY === null) {
         startY = size.height / 2;
       }
-      if (Math.abs(startX) < 1 && Math.abs(startY) < 1) {
+      if (Math.abs(startX) < 1) {
         startX = startX * size.width;
+      }
+      if (Math.abs(startY) < 1) {
         startY = startY * size.height;
       }
-      if (Math.abs(endX) < 1 && Math.abs(endY) < 1) {
+      if (Math.abs(endX) < 1) {
         endX = endX * size.width;
+      }
+      if (Math.abs(endY) < 1) {
         endY = endY * size.height;
       }
       var from = {
@@ -494,25 +543,89 @@ $.extend(au, {
   // Alert-related functions
 
   , getAlertText: function() {
+      var alert = this.mainApp.alert();
+      if (alert.isNil()) {
+        return {
+          status: codes.NoAlertOpenError.code,
+          value: null
+        };
+      }
+
+      var textRes = this.getElementsByType('text', alert);
+      var text = alert.name();
+      if (text.indexOf('http') != -1 && textRes.value.length > 1) {
+        var textId = textRes.value[textRes.value.length-1].ELEMENT;
+        text = this.getElement(textId).name();
+      }
       return {
         status: codes.Success.code,
-        value: this.mainApp.alert().name()
+        value: text
+      };
+    }
+
+  , setAlertText: function(text) {
+      var alert = this.mainApp.alert();
+      var boxRes = this.getElementByType('textfield', alert);
+      if (boxRes.status === codes.Success.code) {
+        var el = this.getElement(boxRes.value.ELEMENT);
+        el.setValueByType(text);
+        return {
+          status: codes.Success.code,
+          value: true
+        };
+      }
+      return {
+        status: codes.ElementNotVisible.code,
+        value: "Tried to set text of an alert that wasn't a prompt"
       };
     }
 
   , acceptAlert: function() {
-      this.mainApp.alert().defaultButton().tap();
+      var alert = this.mainApp.alert();
+      alert.defaultButton().tap();
+      this.waitForAlertToClose(alert);
       return {
         status: codes.Success.code,
         value: null
       };
     }
 
-  , dismissAlert: function() {
-      this.mainApp.alert().cancelButton().tap();
+  , alertIsPresent: function() {
       return {
         status: codes.Success.code,
-        value: null
+        value: !this.mainApp.alert().isNil()
       };
+    }
+
+  , dismissAlert: function() {
+      if (!this.mainApp.alert().cancelButton().isNil()) {
+        var alert = this.mainApp.alert();
+        alert.cancelButton().tap();
+        this.waitForAlertToClose(alert);
+        return {
+          status: codes.Success.code,
+          value: null
+        };
+      } else {
+        return this.acceptAlert();
+      }
+    }
+
+  , waitForAlertToClose: function(alert) {
+      var isClosed = false
+        , i = 0;
+      while (!isClosed) {
+        i++;
+        if (alert.isNil()) {
+          isClosed = true;
+        } else if (i > 10) {
+          // assume another alert popped up
+          console.log("Waited for a while and alert didn't close, moving on");
+          isClosed = true;
+        } else {
+          console.log("Waiting for alert to close...");
+          this.delay(0.3);
+        }
+      }
     }
 });

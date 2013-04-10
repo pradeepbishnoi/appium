@@ -2,18 +2,21 @@
 "use strict";
 
 var spawn = require('child_process').spawn
+  , exec = require('child_process').exec
   , logger = require('../logger').get('appium')
   , fs = require('fs')
   , _ = require('underscore')
   , net = require('net')
   , uuid = require('uuid-js')
+  , path = require('path')
   , codes = require('../app/uiauto/lib/status.js').codes;
 
-var Instruments = function(app, udid, bootstrap, template, sock, cb, exitCb) {
+var Instruments = function(app, udid, bootstrap, template, sock, withoutDelay, cb, exitCb) {
   this.app = app;
   this.udid = udid;
   this.bootstrap = bootstrap;
   this.template = template;
+  this.withoutDelay = withoutDelay;
   this.commandQueue = [];
   this.curCommand = null;
   this.resultHandler = this.defaultResultHandler;
@@ -26,6 +29,7 @@ var Instruments = function(app, udid, bootstrap, template, sock, cb, exitCb) {
   this.onReceiveCommand = null;
   this.guid = uuid.create();
   this.bufferedData = "";
+  this.instrumentsPath = "";
   this.eventRouter = {
     'cmd': this.commandHandler
   };
@@ -55,7 +59,9 @@ Instruments.prototype.startSocketServer = function(sock) {
 
   var onSocketNeverConnect = function() {
     logger.error("Instruments socket client never checked in; timing out".red);
-    this.proc.kill('SIGTERM');
+    if (this.proc !== null) {
+      this.proc.kill('SIGTERM');
+    }
     this.exitHandler(1);
   };
 
@@ -78,15 +84,15 @@ Instruments.prototype.startSocketServer = function(sock) {
     }, this));
 
     this.currentSocket = conn;
-    this.debug("Socket Connected");
+    //this.debug("Socket Connected");
 
     conn.on('close', _.bind(function() {
-        this.debug("Socket Completely closed");
+        //this.debug("Socket Completely closed");
         this.currentSocket = null;
     }, this));
 
     conn.on('end', _.bind(function() {
-      this.debug("Socket closed by other side");
+      //this.debug("Socket closed by other side");
       var data = this.bufferedData;
       this.bufferedData = "";
       try {
@@ -115,14 +121,19 @@ Instruments.prototype.startSocketServer = function(sock) {
     }, this));
 
   }, this));
- 
+
   this.socketServer.on('close', _.bind(function() {
     this.debug("Instruments socket server closed");
   }, this));
-  
-  this.socketServer.listen(sock, _.bind(function() {
-    this.debug("Instruments socket server started at " + sock);
-    this.launch();
+
+  exec('xcrun -find instruments', _.bind(function (error, stdout) {
+    this.instrumentsPath = stdout.trim();
+    logger.info("instruments is: " + this.instrumentsPath);
+
+    this.socketServer.listen(sock, _.bind(function() {
+      this.debug("Instruments socket server started at " + sock);
+      this.launch();
+    }, this));
   }, this));
 };
 
@@ -152,7 +163,7 @@ Instruments.prototype.launch = function() {
         if (self.currentSocket) {
           self.debug("Socket closed forcibly due to exit");
           self.currentSocket.end();
-          self.currentSocket.destroy();	// close this
+          self.currentSocket.destroy(); // close this
           self.socketServer.close();
         }
       });
@@ -166,11 +177,23 @@ Instruments.prototype.spawnInstruments = function(tmpDir) {
   var args = ["-t", this.template];
   if (this.udid) {
     args = args.concat(["-w", this.udid]);
+    logger.info("Attempting to run app on real device with UDID " + this.udid);
   }
   args = args.concat([this.app]);
   args = args.concat(["-e", "UIASCRIPT", this.bootstrap]);
   args = args.concat(["-e", "UIARESULTSPATH", tmpDir]);
-  return spawn("/usr/bin/instruments", args);
+  var env = _.clone(process.env);
+  if (this.withoutDelay && !this.udid) {
+    env.DYLD_INSERT_LIBRARIES = path.resolve(__dirname, "../submodules/instruments-without-delay/build/InstrumentsShim.dylib");
+    env.LIB_PATH = path.resolve(__dirname, "../submodules/instruments-without-delay/build");
+  }
+  logger.info("Spawning instruments with command: " + this.instrumentsPath +
+              " " + args.join(" "));
+  logger.info("And extra without-delay env: " + JSON.stringify({
+    DYLD_INSERT_LIBRARIES: env.DYLD_INSERT_LIBRARIES
+    , LIB_PATH: env.LIB_PATH
+  }));
+  return spawn(this.instrumentsPath, args, {env: env});
 };
 
 
@@ -180,13 +203,14 @@ Instruments.prototype.commandHandler = function(data, c) {
   var hasResult = typeof data.result !== "undefined";
   if (hasResult && !this.curCommand) {
     logger.info("Got a result when we weren't expecting one! Ignoring it");
+    logger.info("Result was: " + JSON.stringify(data.result));
   } else if (!hasResult && this.curCommand) {
     logger.info("Instruments didn't send a result even though we were expecting one");
     hasResult = true;
     data.result = false;
   }
 
-  if (hasResult) {
+  if (hasResult && this.curCommand) {
     if (data.result) {
       this.debug("Got result from instruments: " + JSON.stringify(data.result));
     } else {
@@ -202,7 +226,7 @@ Instruments.prototype.commandHandler = function(data, c) {
     this.debug("Sending command to instruments: " + this.curCommand.cmd);
     c.write(JSON.stringify({nextCommand: this.curCommand.cmd}));
     c.end();
-    this.debug("Closing our half of the connection");
+    //this.debug("Closing our half of the connection");
   }, this));
 };
 
@@ -303,7 +327,7 @@ Instruments.prototype.debug = function(msg) {
 
 /* NODE EXPORTS */
 
-module.exports = function(server, app, udid, bootstrap, template, sock, cb, exitCb) {
-  return new Instruments(server, app, udid, bootstrap, template, sock, cb, exitCb);
+module.exports = function(server, app, udid, bootstrap, template, sock, withoutDelay, cb, exitCb) {
+  return new Instruments(server, app, udid, bootstrap, template, sock, withoutDelay, cb, exitCb);
 };
 

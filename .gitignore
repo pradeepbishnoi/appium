@@ -1,4 +1,7 @@
+.irb-history
+*.swp
 .DS_Store
+npm*.log
 node_modules
 *.trace
 xcuserdata
@@ -12,5 +15,17 @@ sample-code/examples/php/composer.phar
 sample-code/examples/php/vendor
 sample-code/examples/ruby/Gemfile.lock
 *.iml
+*.autosave
 .idea/
 appium*.log*
+uiautomator/bootstrap/bin/*
+uiautomator/bootstrap/local.properties
+uiautomator/bootstrap/project.properties
+uiautomator/bootstrap/.classpath
+sample-code/apps/ApiDemos
+app/android/AndroidManifest.xml.apk
+app/android/AndroidManifest.xml
+.*~
+*~
+uiautomator/bootstrap/target/
+org.eclipse.ltk.core.refactoring.prefs

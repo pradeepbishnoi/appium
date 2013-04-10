@@ -3,6 +3,7 @@
 
 var describeWd = require("../../helpers/driverblock.js").describeForApp('UICatalog')
   , _ = require("underscore")
+  , spinWait = require("../../helpers/spin.js").spinWait
   , should = require('should');
 
 describeWd('findElementFromElement', function(h) {
@@ -21,7 +22,7 @@ describeWd('findElementFromElement', function(h) {
   it('should not find an element not within itself', function(done) {
     h.driver.elementByTagName('tableView', function(err, element) {
       should.exist(element.value);
-      element.elementByTagName('navigationBar', function(err, label) {
+      element.elementByTagName('navigationBar', function(err) {
         should.exist(err);
         done();
       });
@@ -33,6 +34,7 @@ describeWd('findElementFromElement', function(h) {
 describeWd('findElementsFromElement', function(h) {
   it('should find some elements within itself', function(done) {
     h.driver.elementByTagName('tableCell', function(err, element) {
+      should.not.exist(err);
       should.exist(element.value);
       element.elementsByTagName('text', function(err, els) {
         els.length.should.equal(1);
@@ -42,6 +44,7 @@ describeWd('findElementsFromElement', function(h) {
   });
   it('should not find elements not within itself', function(done) {
     h.driver.elementByTagName('tableCell', function(err, element) {
+      should.not.exist(err);
       should.exist(element.value);
       element.elementsByTagName('navigationBar', function(err, els) {
         els.length.should.equal(0);
@@ -106,7 +109,7 @@ describeWd('findElement(s)ByXpath', function(h) {
   });
   it('should know how to restrict root-level elements', function(done) {
     setupXpath(h.driver, function() {
-      h.driver.elementByXPath("/button", function(err, el) {
+      h.driver.elementByXPath("/button", function(err) {
         should.exist(err);
         err.status.should.equal(7);
         done();
@@ -115,12 +118,21 @@ describeWd('findElement(s)ByXpath', function(h) {
   });
   it('should search an extended path by child', function(done) {
     setupXpath(h.driver, function() {
-      h.driver.elementsByXPath("navigationBar/text", function(err, els) {
-        should.not.exist(err);
-        els[0].text(function(err, text) {
-          text.should.equal('Buttons');
-          done();
+      var spinFn = function(spinCb) {
+        h.driver.elementsByXPath("navigationBar/text", function(err, els) {
+          should.not.exist(err);
+          els[0].text(function(err, text) {
+            try {
+              text.should.equal('Buttons');
+              spinCb();
+            } catch (e) {
+              spinCb(e);
+            }
+          });
         });
+      };
+      spinWait(spinFn, function() {
+        done();
       });
     });
   });

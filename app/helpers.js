@@ -2,10 +2,12 @@
 
 var logger = require('../logger').get('appium')
   , fs = require('fs')
+  , ncp = require('ncp').ncp
   , request = require('request')
+  , _ = require('underscore')
   , path = require('path')
+  , rimraf = require('rimraf')
   , exec = require('child_process').exec
-  , inTimeWarp = false
   , temp = require('temp');
 
 exports.downloadFile = function(fileUrl, cb) {
@@ -77,10 +79,11 @@ exports.testZipArchive = function(zipPath, cb) {
   });
 };
 
-exports.unzipApp = function(zipPath, cb) {
+exports.unzipApp = function(zipPath, appExt, cb) {
   exports.unzipFile(zipPath, function(err, output) {
     if (!err) {
-      var match = /inflating: ([^\/]+\.app)\//.exec(output);
+      var reg = new RegExp("inflating: (.+" + appExt + ")/?");
+      var match = reg.exec(output);
       if (match) {
         var appPath = path.resolve(path.dirname(zipPath), match[1]);
         cb(null, appPath);
@@ -95,13 +98,126 @@ exports.unzipApp = function(zipPath, cb) {
   });
 };
 
+exports.checkBuiltInApp = function(appName, version, cb) {
+  logger.info("Looking for built in app " + appName);
+  exports.getBuiltInAppDir(version, function(err, appDir) {
+    if (err) {
+      cb(err);
+    } else {
+      var appPath = path.resolve(appDir, appName + ".app");
+      fs.stat(appPath, function(err, s) {
+        if (err) {
+          cb(err, appPath);
+        } else if (!s.isDirectory()) {
+          cb("App package was not a directory", appPath);
+        } else {
+          logger.info("Got app, trying to copy to tmp dir");
+          exports.copyBuiltInApp(appPath, appName, cb);
+        }
+      });
+    }
+  });
+};
+
+exports.checkSafari = function(version, cb) {
+  exports.checkBuiltInApp("MobileSafari", version, cb);
+};
+
+exports.checkPreferencesApp = function(version, cb) {
+  exports.checkBuiltInApp("Preferences", version, cb);
+};
+
+exports.getBuiltInAppDir = function(version, cb) {
+  var appDir = "/Applications/Xcode.app/Contents/Developer/Platforms" +
+               "/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator" +
+               version + ".sdk/Applications/";
+  fs.stat(appDir, function(err, s) {
+    if (err) {
+      cb(err);
+    } else if (!s.isDirectory()) {
+      cb("Could not load built in applications directory");
+    } else {
+      cb(null, appDir);
+    }
+  });
+};
+
+exports.copyBuiltInApp = function(appPath, appName, cb) {
+  var newAppDir = path.resolve('/tmp/Appium-' + appName + '.app');
+  ncp(appPath, newAppDir, function(err) {
+    if (err) {
+      cb(err);
+    } else {
+      logger.info("Copied " + appName + " to " + newAppDir);
+      cb(null, newAppDir);
+    }
+  });
+};
+
+exports.cleanSafari = function(safariVer, cb) {
+  var baseSupportDir = "Library/Application Support/iPhone Simulator/" +
+                       safariVer + "/Library/";
+  exports.getUser(function(err, user) {
+    if (err) {
+      cb(err);
+    } else {
+      baseSupportDir = path.resolve("/Users", user, baseSupportDir);
+      fs.stat(baseSupportDir, function(err) {
+        if (err) {
+          logger.info(err.message);
+          cb(new Error("Could not find support directory for mobile safari, does " +
+                       "it exist at " + baseSupportDir + "?"));
+        } else {
+          var toDeletes = [
+            'Caches/Snapshots/com.apple.mobilesafari'
+            , 'Caches/com.apple.mobilesafari/Cache.db*'
+            , 'Caches/com.apple.WebAppCache/*.db'
+            , 'Safari/*.plist'
+            , 'WebKit/LocalStorage/*.*'
+            , 'Library/WebKit/GeolocationSites.plist'
+            , 'Cookies/*.binarycookies'
+          ];
+          var deletes = 0;
+          var errToRet = null;
+          var finish = function(err) {
+            deletes++;
+            if (err) {
+              errToRet = err;
+            }
+            if (deletes === toDeletes.length) {
+              cb(errToRet);
+            }
+          };
+          _.each(toDeletes, function(del) {
+            var toDelete = path.resolve(baseSupportDir, del);
+            toDelete = toDelete.replace(/ /g, "\\ ");
+            logger.info("Deleting " + toDelete);
+            var cmd = "rm -rf " + toDelete;
+            exec(cmd, function(err) {
+              finish(err);
+            });
+          });
+        }
+      });
+    }
+  });
+};
+
+exports.getUser = function(cb) {
+  exec("whoami", function(err, stdout) {
+    if (err) {
+      cb(err);
+    } else {
+      cb(null, stdout.trim());
+    }
+  });
+};
 
 exports.delay = function(secs) {
-    var date = new Date();
-    var curDate = null;
-
-    do { curDate = new Date(); }
-    while(curDate-date < (secs * 1000.0));
+  var date = new Date();
+  var curDate = null;
+  do { curDate = new Date(); }
+  while(curDate-date < (secs * 1000.0));
 };
 
 var pad0 = function(x) {
@@ -109,38 +225,6 @@ var pad0 = function(x) {
     x = '0' + x;
   }
   return x;
-};
-
-exports.timeWarp = function(period, warp) {
-  logger.info("Starting time warp");
-  period = typeof period === "undefined" ? 100 : period;
-  warp = typeof warp === "undefined" ? 1000 : warp;
-  var numHops = 0;
-  var makeJump = function() {
-    if (inTimeWarp) {
-      var curMs = Date.now();
-      var newDate = new Date(curMs + warp);
-      var dateStr = [pad0(newDate.getHours()),
-                     pad0(newDate.getMinutes()),
-                     '.', pad0(newDate.getSeconds())]
-                    .join('');
-      exec('sudo /bin/date ' + dateStr, function(err, stdout, stderr) {
-        numHops++;
-        setTimeout(makeJump, period);
-      });
-    } else {
-      var realTime = period * numHops / 1000;
-      var fakeTime = (warp * numHops / 1000) + realTime;
-      var info = "Moved forward " + fakeTime + " secs in " + realTime + " actual seconds";
-      logger.info("Stopping time warp: " + info);
-    }
-  };
-  inTimeWarp = true;
-  makeJump();
-};
-
-exports.stopTimeWarp = function() {
-  inTimeWarp = false;
 };
 
 exports.escapeSpecialChars = function(str, quoteEscape) {
@@ -165,4 +249,32 @@ exports.escapeSpecialChars = function(str, quoteEscape) {
     str = str.replace(re, "\\" + quoteEscape);
   }
   return str;
+};
+
+exports.parseWebCookies = function(cookieStr) {
+  var cookies = [];
+  var splits = cookieStr.trim().split(";");
+  _.each(splits, function(split) {
+    split = split.trim();
+    if (split !== "") {
+      split = split.split("=");
+      cookies.push({
+        name: decodeURIComponent(split[0])
+        , value: decodeURIComponent(split[1])
+      });
+    }
+  });
+  return cookies;
+};
+
+exports.rotateImage = function(imgPath, deg, cb) {
+  logger.info("Rotating image " + imgPath + " " + deg + " degrees");
+  var scriptPath = path.resolve(__dirname, "uiauto/Rotate.applescript");
+  var cmd = "osascript " + scriptPath + " " + JSON.stringify(imgPath) +
+            " " + deg;
+  exec(cmd, function(err, stdout) {
+    if (err) return cb(err);
+    console.log(stdout);
+    cb(null);
+  });
 };

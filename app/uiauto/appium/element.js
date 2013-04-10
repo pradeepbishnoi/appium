@@ -5,6 +5,8 @@ UIAElementNil.prototype.type = function() {
     return "UIAElementNil";
 };
 
+UIAElementNil.prototype.isNil = function() { return true; };
+
 // this is mechanic notation for extending $(UIAElement)
 $.extend($.fn, {
   getActiveElement: function() {
@@ -51,17 +53,22 @@ $.extend($.fn, {
 
 });
 
+UIAElement.prototype.isNil = function() { return false; };
+
 UIAElement.prototype.setValueByType = function(newValue) {
-	var type = this.type();
-	
-	if (type === "UIATextField") {
-		// do the full-on clear,keyboard typing operation
-		this.setValue("");
-		this.tap();
-		au.sendKeysToActiveElement(newValue);
-	} else {
-		this.setValue(newValue);
-	}
+  var type = this.type();
+
+  if (type === "UIATextField" || type === "UIASecureTextField" ||
+      type === "UIATextView") {
+    // do the full-on clear,keyboard typing operation
+    this.setValue("");
+    this.tap();
+    au.sendKeysToActiveElement(newValue);
+  } else if (type === "UIAPickerWheel") {
+    this.selectValue(newValue);
+  } else {
+    this.setValue(newValue);
+  }
 };
 
 UIAElement.prototype.type = function() {
@@ -191,12 +198,16 @@ UIAElement.prototype.getRelCoords = function(startX, startY, endX, endY) {
   if (startY === null) {
     startY = 0.5;
   }
-  if (Math.abs(startX) > 1 || Math.abs(startY) > 1) {
+  if (Math.abs(startX) > 1) {
     startX = startX / size.width;
+  }
+  if (Math.abs(startY) > 1) {
     startY = startY / size.height;
   }
-  if (Math.abs(endX) > 1 || Math.abs(endY) > 1) {
+  if (Math.abs(endX) > 1) {
     endX = endX / size.width;
+  }
+  if (Math.abs(endY) > 1) {
     endY = endY / size.height;
   }
   return {
